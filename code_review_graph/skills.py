@@ -2088,8 +2088,9 @@ def _opencode_plugin_content() -> str:
        with ``git commit``, runs ``code-review-graph detect-changes --brief``
 
     All handlers use try/catch so errors never break the editor session.
-    The plugin uses Bun's ``$`` shell API (provided by OpenCode's plugin
-    context) for subprocess execution.
+    OpenCode plugins return hook callbacks; they do not expose an event-emitter
+    ``app.on`` API. The plugin uses Bun's ``$`` shell API from the plugin input
+    for subprocess execution.
     """
     return """\
 import type { Plugin } from "@opencode-ai/plugin"
@@ -2103,58 +2104,43 @@ import type { Plugin } from "@opencode-ai/plugin"
  * Installed by: code-review-graph install --platform opencode
  */
 
-// Helper: run a shell command quietly, swallowing errors.
-async function run($: any, cmd: string): Promise<string> {
-  try {
-    const result = await $`${cmd}`.quiet()
-    return result.stdout?.toString().trim() ?? ""
-  } catch {
-    return ""
-  }
-}
-
-export default (app: any) => {
-  // 1. Auto-update graph after file edits
-  app.on("file.edited", async ({ $ }: { $: any }) => {
-    try {
-      await $`code-review-graph update --skip-flows`.quiet()
-    } catch {
-      // Swallow — graph may not be built yet for this project.
-    }
-  })
-
-  // 2. Show graph status when a new session starts
-  app.on("session.created", async ({ $ }: { $: any }) => {
-    try {
-      const result = await $`code-review-graph status`.quiet()
-      const output = result.stdout?.toString().trim()
-      if (output) {
-        console.log("[code-review-graph]", output)
+export default (async ({ $, directory }) => ({
+  event: async ({ event }) => {
+    if (event.type === "file.edited") {
+      try {
+        await $`code-review-graph update --skip-flows --repo ${directory}`.quiet()
+      } catch {
+        // Graph may not be built for this project.
       }
-    } catch {
-      // Swallow — not every project has a graph.
     }
-  })
 
-  // 3. Detect changes before git commit commands
-  app.on("tool.execute.before", async (ctx: any) => {
-    try {
-      const input = ctx?.input ?? ctx?.params ?? {}
-      const cmd =
-        input.command ?? input.cmd ?? input.content ?? ""
-      if (typeof cmd === "string" && /^git\\s+commit/i.test(cmd)) {
-        const result =
-          await ctx.$`code-review-graph detect-changes --brief`.quiet()
+    if (event.type === "session.created") {
+      try {
+        const result = await $`code-review-graph status --repo ${directory}`.quiet()
         const output = result.stdout?.toString().trim()
-        if (output) {
-          console.log("[code-review-graph] Pre-commit analysis:\\n" + output)
+        if (output) console.log("[code-review-graph]", output)
+      } catch {
+        // Not every project has a graph.
+      }
+    }
+  },
+
+  "tool.execute.before": async (input, output) => {
+    try {
+      const command = input.tool === "bash" ? output.args?.command : ""
+      if (typeof command === "string" && /^\\s*git\\s+commit(?:\\s|$)/i.test(command)) {
+        const result =
+          await $`code-review-graph detect-changes --brief --repo ${directory}`.quiet()
+        const analysis = result.stdout?.toString().trim()
+        if (analysis) {
+          console.log("[code-review-graph] Pre-commit analysis:\\n" + analysis)
         }
       }
     } catch {
-      // Swallow — never block a commit.
+      // Never block a commit.
     }
-  })
-}
+  },
+})) satisfies Plugin
 """
 
 

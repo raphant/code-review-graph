@@ -2358,6 +2358,16 @@ class TestOpenCodePluginContent:
         content = _opencode_plugin_content()
         assert "export default" in content
 
+    def test_uses_current_opencode_hook_api(self):
+        content = _opencode_plugin_content()
+        assert "app.on(" not in content
+        assert "event: async ({ event })" in content
+        assert 'event.type === "file.edited"' in content
+        assert 'event.type === "session.created"' in content
+        assert '"tool.execute.before": async (input, output)' in content
+        assert 'input.tool === "bash"' in content
+        assert "satisfies Plugin" in content
+
     def test_hooks_file_edited_event(self):
         content = _opencode_plugin_content()
         assert '"file.edited"' in content

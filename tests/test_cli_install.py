@@ -22,6 +22,24 @@ def _args(tmp_path: Path, platform: str) -> argparse.Namespace:
     )
 
 
+def test_dry_run_no_instructions_omits_instruction_preview(
+    monkeypatch, tmp_path, capsys
+):
+    (tmp_path / "CLAUDE.md").write_text("# Existing\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_platform_configs",
+        lambda repo_root, target, dry_run=False: ["Claude Code"],
+    )
+    args = _args(tmp_path, "claude-code")
+    args.dry_run = True
+
+    _handle_init(args)
+
+    output = capsys.readouterr().out
+    assert "Graph instructions will be injected into" not in output
+    assert "CLAUDE.md (append)" not in output
+
+
 def test_copilot_cli_install_reinstall_uninstall_lifecycle(
     monkeypatch, tmp_path
 ):
