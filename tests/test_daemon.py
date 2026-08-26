@@ -964,6 +964,9 @@ class TestDaemonCLI:
         args = MagicMock()
         args.path = str(repo)
         args.alias = "cli-alias"
+        # Embedding refresh is opt-in; a plain add forwards the empty pair.
+        args.embedding_provider = None
+        args.embedding_model = None
 
         with (
             patch(
@@ -976,7 +979,12 @@ class TestDaemonCLI:
             patch("builtins.print") as mock_print,
         ):
             _handle_add(args)
-            mock_add.assert_called_once_with(str(repo), alias="cli-alias")
+            mock_add.assert_called_once_with(
+                str(repo),
+                alias="cli-alias",
+                embedding_provider=None,
+                embedding_model=None,
+            )
             # Verify confirmation printed
             printed = " ".join(str(c) for c in mock_print.call_args_list)
             assert "cli-alias" in printed

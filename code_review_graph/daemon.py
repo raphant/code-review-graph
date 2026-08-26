@@ -122,6 +122,12 @@ class WatchRepo:
     alias: str
     """Short name for this repo (derived from directory name when not specified)."""
 
+    embedding_provider: str | None = None
+    """Provider this repo's watcher refreshes embeddings with, or None to inherit."""
+
+    embedding_model: str | None = None
+    """Exact model for :attr:`embedding_provider`.  Set together or not at all."""
+
 
 @dataclass
 class DaemonConfig:
@@ -136,13 +142,59 @@ class DaemonConfig:
     poll_interval: int = 2
     """Seconds between file-system polls for config changes."""
 
+    embedding_provider: str | None = None
+    """Default embedding provider inherited by repos that set neither key."""
+
+    embedding_model: str | None = None
+    """Exact model for :attr:`embedding_provider`.  Set together or not at all."""
+
     repos: list[WatchRepo] = field(default_factory=list)
     """Repositories the daemon watches."""
+
+    def resolved_embedding(self, repo: WatchRepo) -> tuple[str, str] | None:
+        """Embedding provider/model a watcher for *repo* should refresh with.
+
+        A repo that names its own provider uses that pair alone; one that names
+        neither inherits the ``[daemon]`` default.  Mixing a repo provider with
+        the daemon's model would embed under an identity nobody configured, so
+        the two scopes are never combined.
+        """
+        if repo.embedding_provider and repo.embedding_model:
+            return repo.embedding_provider, repo.embedding_model
+        if self.embedding_provider and self.embedding_model:
+            return self.embedding_provider, self.embedding_model
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
+
+
+def _read_embedding_pair(
+    section: dict[str, Any],
+    scope: str,
+) -> tuple[str | None, str | None]:
+    """Read an all-or-nothing embedding provider/model pair from a TOML table.
+
+    Mirrors the CLI rule that ``--embedding-provider`` and ``--embedding-model``
+    are supplied together: a half-configured pair would otherwise resolve to a
+    provider default nobody asked for, so it is dropped with a warning.
+    """
+    provider = section.get("embedding_provider")
+    model = section.get("embedding_model")
+    provider = str(provider).strip() if provider else None
+    model = str(model).strip() if model else None
+    if bool(provider) != bool(model):
+        logger.warning(
+            "Ignoring embedding config for %s — embedding_provider and "
+            "embedding_model must both be set (got provider=%r, model=%r)",
+            scope,
+            provider,
+            model,
+        )
+        return None, None
+    return provider, model
 
 
 def load_config(path: Path | None = None) -> DaemonConfig:
@@ -177,6 +229,7 @@ def load_config(path: Path | None = None) -> DaemonConfig:
     session_name: str = daemon_section.get("session_name", "crg-watch")
     log_dir = Path(daemon_section.get("log_dir", str(DaemonConfig().log_dir)))
     poll_interval: int = int(daemon_section.get("poll_interval", 2))
+    default_provider, default_model = _read_embedding_pair(daemon_section, "[daemon]")
 
     # -- [[repos]] array ----------------------------------------------------
     repos: list[WatchRepo] = []
@@ -212,13 +265,24 @@ def load_config(path: Path | None = None) -> DaemonConfig:
             logger.warning("Skipping duplicate alias '%s' for repo %s", alias, repo_path)
             continue
 
+        repo_provider, repo_model = _read_embedding_pair(entry, f"repo '{alias}'")
+
         seen_aliases.add(alias)
-        repos.append(WatchRepo(path=str(repo_path), alias=alias))
+        repos.append(
+            WatchRepo(
+                path=str(repo_path),
+                alias=alias,
+                embedding_provider=repo_provider,
+                embedding_model=repo_model,
+            )
+        )
 
     return DaemonConfig(
         session_name=session_name,
         log_dir=log_dir,
         poll_interval=poll_interval,
+        embedding_provider=default_provider,
+        embedding_model=default_model,
         repos=repos,
     )
 
@@ -273,11 +337,19 @@ def _serialize_toml(config: DaemonConfig) -> str:
         f"log_dir = {_toml_str(config.log_dir)}",
         f"poll_interval = {config.poll_interval}",
     ]
+    if config.embedding_provider and config.embedding_model:
+        lines.append(f"embedding_provider = {_toml_str(config.embedding_provider)}")
+        lines.append(f"embedding_model = {_toml_str(config.embedding_model)}")
     for repo in config.repos:
         lines.append("")
         lines.append("[[repos]]")
         lines.append(f"path = {_toml_str(repo.path)}")
         lines.append(f"alias = {_toml_str(repo.alias)}")
+        if repo.embedding_provider and repo.embedding_model:
+            lines.append(
+                f"embedding_provider = {_toml_str(repo.embedding_provider)}"
+            )
+            lines.append(f"embedding_model = {_toml_str(repo.embedding_model)}")
     lines.append("")  # trailing newline
     return "\n".join(lines)
 
@@ -306,6 +378,8 @@ def add_repo_to_config(
     repo_path: str,
     alias: str | None = None,
     config_path: Path | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
 ) -> DaemonConfig:
     """Add a repository to the daemon config and persist the change.
 
@@ -313,13 +387,23 @@ def add_repo_to_config(
         repo_path:   Path to the repository (will be resolved to absolute).
         alias:       Optional short name.  Derived from dirname if *None*.
         config_path: Explicit config file path.  Falls back to :func:`default_config_path`.
+        embedding_provider: Provider this repo's watcher refreshes embeddings
+            with.  Must be supplied together with *embedding_model*; omit both
+            to inherit the ``[daemon]`` default.
+        embedding_model: Exact model for *embedding_provider*.
 
     Returns:
         The updated :class:`DaemonConfig`.
 
     Raises:
-        ValueError: If the path is not a valid repository directory.
+        ValueError: If the path is not a valid repository directory, or the
+            embedding provider/model pair is only half supplied.
     """
+    if bool(embedding_provider) != bool(embedding_model):
+        raise ValueError(
+            "embedding_provider and embedding_model must be supplied together",
+        )
+
     resolved = Path(repo_path).expanduser().resolve()
 
     if not resolved.is_dir():
@@ -345,7 +429,14 @@ def add_repo_to_config(
         if existing.alias == effective_alias:
             raise ValueError(f"Alias '{effective_alias}' is already in use by {existing.path}")
 
-    config.repos.append(WatchRepo(path=str(resolved), alias=effective_alias))
+    config.repos.append(
+        WatchRepo(
+            path=str(resolved),
+            alias=effective_alias,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+        )
+    )
     save_config(config, config_path)
     return config
 
@@ -758,6 +849,10 @@ class WatchDaemon:
         self._state_path: Path = default_state_path()
         self._children: dict[str, subprocess.Popen[bytes]] = {}
         self._current_repos: dict[str, WatchRepo] = {}
+        # The embedding identity each running watcher was actually spawned
+        # with.  Recomputing it from the live config would compare the new
+        # config against itself, so a changed default would never restart.
+        self._current_embeddings: dict[str, tuple[str, str] | None] = {}
         self._config_watcher: ConfigWatcher | None = None
         self._health_thread: threading.Thread | None = None
         self._health_stop: threading.Event = threading.Event()
@@ -817,6 +912,7 @@ class WatchDaemon:
             self._children.clear()
 
         self._current_repos.clear()
+        self._current_embeddings.clear()
         self._clear_state()
         clear_pid()
         logger.info("Daemon stopped")
@@ -840,6 +936,8 @@ class WatchDaemon:
             alias
             for alias in desired.keys() & current
             if desired[alias].path != self._current_repos[alias].path
+            or self._config.resolved_embedding(desired[alias])
+            != self._current_embeddings.get(alias)
         }
 
         # Register new/updated repos and build graphs *before* acquiring
@@ -868,6 +966,7 @@ class WatchDaemon:
                     self._terminate_child(alias, proc, self._current_repos[alias].path)
                 self._restarts.pop(alias, None)
                 del self._current_repos[alias]
+                self._current_embeddings.pop(alias, None)
 
             # Add new watchers
             for alias in to_add:
@@ -1224,6 +1323,18 @@ class WatchDaemon:
                 repo.path,
             ]
 
+        # Without this the watcher keeps the graph current but never the
+        # vectors, so semantic search decays on exactly the code just edited.
+        embedding = self._config.resolved_embedding(repo)
+        if embedding is not None:
+            provider, model = embedding
+            cmd += [
+                "--embedding-provider",
+                provider,
+                "--embedding-model",
+                model,
+            ]
+
         log_fd = open(log_path, "ab")  # noqa: SIM115
         try:
             proc = subprocess.Popen(
@@ -1243,13 +1354,15 @@ class WatchDaemon:
         log_fd.close()
 
         self._children[repo.alias] = proc
+        self._current_embeddings[repo.alias] = embedding
         self._restarts.setdefault(repo.alias, {"count": 0, "next_attempt": 0.0})
         self._restarts[repo.alias]["started_at"] = time.monotonic()
         logger.info(
-            "Started watcher for '%s' (PID %d) — log: %s",
+            "Started watcher for '%s' (PID %d) — log: %s%s",
             repo.alias,
             proc.pid,
             log_path,
+            f" — embeddings: {embedding[0]}/{embedding[1]}" if embedding else "",
         )
 
     @staticmethod

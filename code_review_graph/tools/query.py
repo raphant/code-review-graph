@@ -865,8 +865,20 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
         emb_store = EmbeddingStore(get_db_path(root))
         try:
             emb_count = emb_store.count()
+            unembedded = emb_store.unembedded_count()
             summary_parts.append("")
             summary_parts.append(f"Embeddings: {emb_count} nodes embedded")
+            if emb_count and unembedded:
+                # Semantic search stays "on" while silently missing these, and
+                # they are the newest code — the part most likely under review.
+                summary_parts.append(
+                    f"  {unembedded} node(s) have no embedding — semantic "
+                    "search cannot see them"
+                )
+                summary_parts.append(
+                    "  Fix: code-review-graph embed, or set embedding_provider/"
+                    "embedding_model in watch.toml"
+                )
             if not emb_store.available:
                 summary_parts.append(
                     "  (install sentence-transformers for semantic search)"
@@ -885,6 +897,7 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
             "files_count": stats.files_count,
             "last_updated": stats.last_updated,
             "embeddings_count": emb_count,
+            "unembedded_count": unembedded,
         }
     finally:
         store.close()

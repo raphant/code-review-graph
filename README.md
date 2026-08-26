@@ -444,6 +444,12 @@ Under the hood, `crg-daemon add` writes to a TOML config file at
 `~/.code-review-graph/watch.toml`. You can also edit this file directly:
 
 ```toml
+[daemon]
+# Optional: re-embed changed nodes on every watch update, so semantic search
+# does not decay on newly written code. Both keys are required together.
+embedding_provider = "local"
+embedding_model = "all-MiniLM-L6-v2"
+
 [[repos]]
 path = "/home/user/project-a"
 alias = "proj-a"
@@ -456,6 +462,10 @@ alias = "project-b"
 The daemon monitors this config file for changes and automatically starts/stops
 watcher processes as repos are added or removed. Health checks every 30 seconds
 restart dead watchers. No external dependencies required.
+
+Embedding refresh is opt-in and refresh-only: run `code-review-graph embed` once
+first, then the daemon keeps the index current. `crg-daemon status` shows which
+repos are refreshing; `list_graph_stats` reports `unembedded_count` for the rest.
 
 See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for the
 full config reference and all available options.

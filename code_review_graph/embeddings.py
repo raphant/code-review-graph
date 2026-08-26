@@ -1303,6 +1303,45 @@ class EmbeddingStore:
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
 
+    def unembedded_count(self) -> int:
+        """Number of embeddable graph nodes with no vector at all.
+
+        This is the visible half of embedding decay: nodes added since the last
+        embed run.  A node whose body changed keeps its qualified name and so
+        still counts as embedded here even though its vector is stale — proving
+        that would mean re-hashing every node's text on a call meant to be
+        cheap.  Keeping the daemon refreshing is what closes that half.
+
+        Returns 0 when the graph shares no ``nodes`` table (standalone
+        embedding databases) — there is nothing to compare against.
+        """
+        has_nodes = self._conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'nodes'",
+        ).fetchone()
+        if has_nodes is None:
+            return 0
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM nodes "
+            "WHERE nodes.kind != 'File' "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM embeddings "
+            "WHERE embeddings.qualified_name = nodes.qualified_name"
+            ")",
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+
+def _embeddable_nodes(graph_store: GraphStore) -> list[GraphNode]:
+    """Every node a vector can be built for.
+
+    Deliberately not a walk over ``get_all_files()``: that inventory excludes
+    virtual nodes (Spring Event markers and the like), which left them
+    permanently unembeddable even though they carry a meaningful name and are
+    already reachable by FTS.  One query also beats one per file.
+    """
+    return graph_store.get_all_nodes(exclude_files=True)
+
 
 def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) -> int:
     """Purge deleted nodes, then embed all current non-file nodes."""
@@ -1310,12 +1349,7 @@ def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) ->
     if not embedding_store.available:
         return 0
 
-    all_files = graph_store.get_all_files()
-    all_nodes: list[GraphNode] = []
-    for f in all_files:
-        all_nodes.extend(graph_store.get_nodes_by_file(f))
-
-    return embedding_store.embed_nodes(all_nodes)
+    return embedding_store.embed_nodes(_embeddable_nodes(graph_store))
 
 
 def refresh_embeddings(
@@ -1391,10 +1425,7 @@ def refresh_embeddings(
             )
 
         purged = embedding_store.purge_orphans()
-        all_nodes: list[GraphNode] = []
-        for file_path in graph_store.get_all_files():
-            all_nodes.extend(graph_store.get_nodes_by_file(file_path))
-        embedded = embedding_store.embed_nodes(all_nodes)
+        embedded = embedding_store.embed_nodes(_embeddable_nodes(graph_store))
         return {"embedded": embedded, "purged": purged}
     finally:
         embedding_store.close()
