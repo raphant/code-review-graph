@@ -53,4 +53,4 @@
 # - github.org
 # - github.repo
 
-sync.remote: "git+https://github.com/tirth8205/code-review-graph.git"
+# sync.remote: "git+https://github.com/raphant/code-review-graph.git"
