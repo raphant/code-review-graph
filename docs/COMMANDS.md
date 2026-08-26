@@ -438,7 +438,7 @@ crg-daemon stop                       # Stop the daemon and all watcher processe
 crg-daemon restart [--foreground]     # Restart (stop + start)
 crg-daemon status                     # Show daemon status, repos, and process liveness
 crg-daemon logs [--repo ALIAS] [-f] [-n N]  # Tail daemon or per-repo log files
-crg-daemon add <path> [--alias NAME]  # Add a repository to watch.toml
+crg-daemon add <path> [--alias NAME] [--embedding-provider P --embedding-model M]
 crg-daemon remove <path_or_alias>     # Remove a repository from watch.toml
 ```
 
@@ -447,9 +447,15 @@ crg-daemon remove <path_or_alias>     # Remove a repository from watch.toml
 The daemon reads its configuration from `~/.code-review-graph/watch.toml`:
 
 ```toml
+[daemon]
 session_name = "crg-watch"   # logical daemon name
 log_dir = "~/.code-review-graph/logs"
 poll_interval = 2            # seconds between config file polls
+
+# Optional: keep embeddings current on every watch update.  Both keys are
+# required together; every repo below inherits them unless it sets its own.
+embedding_provider = "local"
+embedding_model = "all-MiniLM-L6-v2"
 
 [[repos]]
 path = "/home/user/project-a"
@@ -458,6 +464,9 @@ alias = "project-a"
 [[repos]]
 path = "/home/user/project-b"
 alias = "project-b"
+# Per-repo override — also all-or-nothing.
+embedding_provider = "voyage"
+embedding_model = "voyage-code-3"
 ```
 
 The daemon spawns one `code-review-graph watch` child process per repo,
@@ -466,3 +475,40 @@ automatically reconciles child processes (starting/stopping as repos are
 added or removed). Health checks run every 30 seconds and automatically
 restart dead watchers. No external dependencies (tmux, screen, etc.) are
 required.
+
+### Keeping embeddings current
+
+Without `embedding_provider` / `embedding_model`, a watcher keeps the graph
+current but never its vectors. Nodes added after the last `embed` run have no
+embedding at all, so semantic search silently degrades toward keyword matching
+on exactly the code most likely to be under review.
+
+With the pair set, each watch update runs the same explicit refresh that
+`build`/`update --embedding-provider` run, so new and changed nodes are
+re-embedded as you edit. Notes:
+
+- **Refresh, not bootstrap.** A graph with no vectors yet is left alone; run
+  `code-review-graph embed` once first. This keeps a routine build from loading
+  a model or calling a paid API nobody asked for.
+- **Identity is pinned.** A refresh refuses to run if the existing vectors were
+  written by a different provider or model. Re-embed explicitly to migrate.
+- **Failures degrade, they do not crash.** An unreachable or rate-limited
+  provider logs a warning and leaves the graph correct with stale vectors. It
+  does not kill the watcher, which would otherwise restart on every file save.
+- **Backlogs self-heal on the next change.** A repo that gained nodes while the
+  daemon was down catches up on the first watch update, because the refresh
+  walks the whole graph rather than only the changed files.
+- **Cloud providers send source-derived text off the machine.** `local` keeps
+  everything on disk; `openai`, `google`, `minimax`, and `voyage` do not.
+- **A supervised daemon does not inherit your shell.** Under launchd, systemd,
+  or any service manager, the watchers get that manager's environment. The
+  `local` provider resolves its model through Hugging Face, so on a machine
+  that cannot reach it, set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` in
+  the service definition once the model is cached. Otherwise every refresh
+  fails, and thanks to the degrade-not-crash rule it fails quietly.
+
+`crg-daemon status` shows the resolved provider/model per repo under `Embed`,
+and names the repos still showing `-`. `list_graph_stats` reports
+`unembedded_count`: how many nodes semantic search cannot see. A node whose
+body changed keeps its name and so still counts as embedded even when its
+vector is stale — running the daemon refresh is what closes that half.

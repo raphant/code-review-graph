@@ -159,16 +159,30 @@ def _handle_status(_args: argparse.Namespace) -> None:
     alias_width = max(len(r.alias) for r in config.repos)
     alias_width = max(alias_width, 5)  # minimum "Alias" header width
 
+    # A watcher with no embedding pair keeps the graph current but never its
+    # vectors, so show the resolved identity rather than making people read
+    # watch.toml to find out why semantic search went quiet.
+    embed_labels = {
+        repo.alias: (
+            f"{pair[0]}/{pair[1]}"
+            if (pair := config.resolved_embedding(repo)) is not None
+            else "-"
+        )
+        for repo in config.repos
+    }
+    embed_width = max(len("Embed"), *(len(v) for v in embed_labels.values()))
+    unembedded = [alias for alias, label in embed_labels.items() if label == "-"]
+
     if running:
         state = load_state()
         header = (
             f"  {'Alias':<{alias_width}}  {'Status':<8}  {'Watcher':<8}  "
-            f"{'PID':<8}  {'Event':<6}  Path"
+            f"{'PID':<8}  {'Event':<6}  {'Embed':<{embed_width}}  Path"
         )
         print(header)
         print(
             f"  {'-' * alias_width}  {'-' * 8}  {'-' * 8}  {'-' * 8}  "
-            f"{'-' * 6}  {'-' * 40}"
+            f"{'-' * 6}  {'-' * embed_width}  {'-' * 40}"
         )
         stalled = False
         degraded = False
@@ -190,7 +204,8 @@ def _handle_status(_args: argparse.Namespace) -> None:
             )
             print(
                 f"  {repo.alias:<{alias_width}}  {status_str:<8}  {watcher:<8}  "
-                f"{pid_str:<8}  {event_str:<6}  {repo.path}"
+                f"{pid_str:<8}  {event_str:<6}  "
+                f"{embed_labels[repo.alias]:<{embed_width}}  {repo.path}"
             )
         if stalled:
             print()
@@ -213,10 +228,35 @@ def _handle_status(_args: argparse.Namespace) -> None:
                 "CRG_MAX_WATCH_SCHEDULES."
             )
     else:
-        print(f"  {'Alias':<{alias_width}}  Path")
-        print(f"  {'-' * alias_width}  {'-' * 40}")
+        print(f"  {'Alias':<{alias_width}}  {'Embed':<{embed_width}}  Path")
+        print(f"  {'-' * alias_width}  {'-' * embed_width}  {'-' * 40}")
         for repo in config.repos:
-            print(f"  {repo.alias:<{alias_width}}  {repo.path}")
+            print(
+                f"  {repo.alias:<{alias_width}}  "
+                f"{embed_labels[repo.alias]:<{embed_width}}  {repo.path}"
+            )
+
+    if unembedded:
+        # Naming eight aliases inline is unreadable, and "all" is the case
+        # people actually hit right after adopting the daemon.
+        if len(unembedded) == len(config.repos):
+            scope = "every repo"
+        elif len(unembedded) <= 3:
+            scope = ", ".join(sorted(unembedded))
+        else:
+            named = ", ".join(sorted(unembedded)[:3])
+            scope = f"{named} and {len(unembedded) - 3} more"
+        print()
+        print(f"  Embed '-' ({scope}): the graph stays current but its vectors do not,")
+        print("  so semantic search decays on newly changed code. Fix with either:")
+        print(
+            "    crg-daemon add <path> --embedding-provider local "
+            "--embedding-model all-MiniLM-L6-v2"
+        )
+        print(
+            "    or one embedding_provider/embedding_model pair under "
+            "[daemon] in watch.toml"
+        )
 
 
 def _handle_logs(args: argparse.Namespace) -> None:
@@ -259,8 +299,16 @@ def _handle_add(args: argparse.Namespace) -> None:
     """Add a repository to the daemon config."""
     from .daemon import add_repo_to_config, is_daemon_running
 
+    provider = getattr(args, "embedding_provider", None)
+    model = getattr(args, "embedding_model", None)
+
     try:
-        add_repo_to_config(args.path, alias=args.alias)
+        add_repo_to_config(
+            args.path,
+            alias=args.alias,
+            embedding_provider=provider,
+            embedding_model=model,
+        )
     except ValueError as exc:
         print(f"Error: {exc}")
         sys.exit(1)
@@ -268,6 +316,8 @@ def _handle_add(args: argparse.Namespace) -> None:
     # Find the repo we just added to show confirmation
     alias = args.alias or os.path.basename(os.path.abspath(args.path))
     print(f"Added repository: {args.path} (alias: {alias})")
+    if provider and model:
+        print(f"Embedding refresh: {provider} / {model}")
 
     if is_daemon_running():
         print("Daemon will pick up the change automatically.")

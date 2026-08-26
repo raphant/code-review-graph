@@ -23,6 +23,7 @@ Usage:
     code-review-graph daemon status
     code-review-graph daemon logs [--repo ALIAS] [--follow] [--lines N]
     code-review-graph daemon add <path> [--alias NAME]
+        [--embedding-provider P --embedding-model M]
     code-review-graph daemon remove <path_or_alias>
 """
 
@@ -305,7 +306,7 @@ def _handle_init(args: argparse.Namespace) -> None:
 
     # Preview the instruction files that would be touched (#173).
     instr_targets = _instruction_files_to_modify(repo_root, target)
-    if instr_targets:
+    if instr_targets and not skip_instructions:
         print()
         print("Graph instructions will be injected into:")
         for t in instr_targets:
@@ -1341,6 +1342,7 @@ def main() -> None:
         default=None,
         help="Short alias for the repo",
     )
+    _add_embedding_refresh_args(daemon_add)
 
     daemon_remove = daemon_sub.add_parser(
         "remove",

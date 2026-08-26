@@ -28,6 +28,12 @@ from .graph import GraphStore
 logger = logging.getLogger(__name__)
 
 
+#: Result key holding only the embedding-refresh warnings.  These are a subset
+#: of ``result["warnings"]`` — duplicated, not moved, so existing callers that
+#: read ``warnings`` still see every failure.
+EMBEDDING_WARNINGS_KEY = "embedding_warnings"
+
+
 def run_post_processing(
     store: GraphStore,
     *,
@@ -187,6 +193,7 @@ def _refresh_embeddings(
         warning = "Embedding refresh requires both an explicit provider and model."
         logger.warning(warning)
         warnings.append(warning)
+        _record_embedding_warning(result, warning)
         return
 
     try:
@@ -198,6 +205,17 @@ def _refresh_embeddings(
             result["embeddings_purged"] = refreshed["purged"]
     except Exception as exc:
         logger.warning("Embedding refresh failed: %s", exc)
-        warnings.append(
-            f"Embedding refresh failed: {type(exc).__name__}: {exc}",
-        )
+        warning = f"Embedding refresh failed: {type(exc).__name__}: {exc}"
+        warnings.append(warning)
+        _record_embedding_warning(result, warning)
+
+
+def _record_embedding_warning(result: dict[str, Any], warning: str) -> None:
+    """Also file *warning* under the embedding-specific key.
+
+    A failed refresh leaves the graph itself correct, only its vectors stale.
+    Watch callers use this key to tell "the index is behind" apart from "the
+    graph is broken", so a rate-limited provider degrades semantic search
+    instead of crash-looping the watcher.  See: EMBEDDING_WARNINGS_KEY.
+    """
+    result.setdefault(EMBEDDING_WARNINGS_KEY, []).append(warning)

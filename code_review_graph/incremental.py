@@ -1581,12 +1581,31 @@ def _raise_watch_update_errors(result: dict, context: str) -> None:
 
 
 def _raise_watch_postprocess_warnings(result: object) -> None:
-    """Treat structured post-processing warnings as a failed watch update."""
+    """Treat structured post-processing warnings as a failed watch update.
+
+    Embedding-refresh failures are the one exception.  They leave the graph
+    itself correct and only the vectors stale, so escalating them would turn a
+    rate-limited or briefly offline provider into a watcher that dies and is
+    restarted by the daemon on every single file save.  They are logged and the
+    watcher keeps the graph current; semantic search degrades until the next
+    successful refresh.
+    """
     if not isinstance(result, dict):
         return
-    warnings = result.get("warnings") or []
-    if warnings:
-        details = "; ".join(str(warning) for warning in warnings)
+    from .postprocessing import EMBEDDING_WARNINGS_KEY
+
+    warnings = [str(warning) for warning in (result.get("warnings") or [])]
+    embedding_warnings = {
+        str(warning) for warning in (result.get(EMBEDDING_WARNINGS_KEY) or [])
+    }
+    for warning in embedding_warnings:
+        logger.warning(
+            "Watch update kept the graph current but not its embeddings: %s",
+            warning,
+        )
+    fatal = [warning for warning in warnings if warning not in embedding_warnings]
+    if fatal:
+        details = "; ".join(fatal)
         raise RuntimeError(f"post-processing reported warnings: {details}")
 
 
